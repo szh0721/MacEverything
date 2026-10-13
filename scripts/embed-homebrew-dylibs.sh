@@ -14,6 +14,10 @@ if [[ ! -d "$APP_PATH/Contents/MacOS" ]]; then
   exit 66
 fi
 
+# Xcode resolves the identity to a certificate hash. Use the same identity
+# for nested code so certificate-signed apps pass hardened library validation.
+sign_identity="${EXPANDED_CODE_SIGN_IDENTITY:-${CODE_SIGN_IDENTITY:--}}"
+
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS_DIR"
 
@@ -161,7 +165,7 @@ rewrite_dylib_references() {
       fi
     done < <(otool -L "$dylib" | awk 'NR > 1 { print $1 }')
 
-    codesign --force --sign - "$dylib" >/dev/null 2>&1
+    codesign --force --sign "$sign_identity" "$dylib" >/dev/null 2>&1
   done
 }
 
@@ -174,7 +178,7 @@ for binary in "${BINARIES[@]}"; do
   path="$APP_PATH/Contents/MacOS/$binary"
   [[ -f "$path" ]] || continue
   codesign --remove-signature "$path" >/dev/null 2>&1 || true
-  codesign --force --sign - "$path" >/dev/null 2>&1
+  codesign --force --sign "$sign_identity" "$path" >/dev/null 2>&1
 done
 
 if [[ -n "${SCRIPT_OUTPUT_FILE_0:-}" ]]; then

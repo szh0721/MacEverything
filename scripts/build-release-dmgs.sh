@@ -26,8 +26,6 @@ else
   archs=(arm64 x86_64)
 fi
 
-mkdir -p "$artifact_dir"
-
 brew_prefix_for_arch() {
   case "$1" in
     arm64) echo "${ARM64_BREW_PREFIX:-/opt/homebrew}" ;;
@@ -162,6 +160,20 @@ verify_app_arch() {
   done < <(find "$app_path/Contents/Frameworks" -name '*.dylib' -print)
 }
 
+verify_app_signing() {
+  local app_path="$1"
+  codesign --verify --deep --strict "$app_path"
+
+  if [[ "$sign_identity" == "-" ]]; then
+    local signature_details
+    signature_details="$(codesign -d --verbose=4 "$app_path" 2>&1)"
+    if printf '%s\n' "$signature_details" | grep -Eq '^CodeDirectory .*flags=.*runtime'; then
+      echo "error: ad-hoc app still enables hardened runtime and cannot load embedded dylibs" >&2
+      exit 65
+    fi
+  fi
+}
+
 build_arch() {
   local arch="$1"
   local dep_root="$2"
@@ -172,9 +184,12 @@ build_arch() {
 
   rm -rf "$symroot" "$derived_data"
 
-  local sign_style=Manual
-  if [[ "$sign_identity" != "-" ]]; then
-    sign_style=Manual
+  # Ad-hoc signatures have no Team ID, so hardened library validation
+  # cannot authenticate the embedded RE2/Abseil libraries. Certificate-signed
+  # builds keep the hardened runtime and sign embedded code with that identity.
+  local hardened_runtime=YES
+  if [[ "$sign_identity" == "-" ]]; then
+    hardened_runtime=NO
   fi
 
   xcodebuild \
@@ -187,12 +202,14 @@ build_arch() {
     ARCHS="$arch" \
     ONLY_ACTIVE_ARCH=NO \
     RE2_DEPENDENCY_ROOT="$dep_root" \
-    CODE_SIGN_STYLE="$sign_style" \
+    CODE_SIGN_STYLE=Manual \
     CODE_SIGN_IDENTITY="$sign_identity" \
     DEVELOPMENT_TEAM="$development_team" \
+    ENABLE_HARDENED_RUNTIME="$hardened_runtime" \
     build
 
   verify_app_arch "$arch" "$app_path"
+  verify_app_signing "$app_path"
   "$root_dir/scripts/create-dmg.sh" "$app_path" "$dmg_path" "$volume_name"
   if [[ -n "$notary_profile" ]]; then
     xcrun notarytool submit "$dmg_path" --keychain-profile "$notary_profile" --wait
@@ -201,8 +218,11 @@ build_arch() {
   echo "Built $dmg_path"
 }
 
-for arch in "${archs[@]}"; do
-  echo "==> Building $arch DMG"
-  dep_root="$(prepare_re2_for_arch "$arch")"
-  build_arch "$arch" "$dep_root"
-done
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  mkdir -p "$artifact_dir"
+  for arch in "${archs[@]}"; do
+    echo "==> Building $arch DMG"
+    dep_root="$(prepare_re2_for_arch "$arch")"
+    build_arch "$arch" "$dep_root"
+  done
+fi
